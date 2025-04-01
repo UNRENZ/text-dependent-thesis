@@ -1,0 +1,133 @@
+import numpy as np
+import soundfile as sf
+import librosa
+import noisereduce as nr
+import time
+import speech_recognition as sr
+from fuzzywuzzy import fuzz
+from scipy.signal import butter, lfilter
+
+
+# Function to apply noise reduction
+def reduce_noise(audio_data, sample_rate):
+    return nr.reduce_noise(y=audio_data, sr=sample_rate, prop_decrease=0.2)  # Default is 1.0 (too strong)
+
+# Function to normalize the audio volume
+def normalize_audio(audio_data):
+    return librosa.util.normalize(audio_data)
+
+# Function to apply high-pass filtering (removes low-frequency noise)
+def butter_highpass(cutoff, sr, order=5):
+    nyquist = 0.5 * sr
+    normal_cutoff = cutoff / nyquist
+    b, a = butter(order, normal_cutoff, btype='high', analog=False)
+    return b, a
+
+def apply_highpass(audio_data, sr, cutoff=100):
+    b, a = butter_highpass(cutoff, sr)
+    return lfilter(b, a, audio_data)
+
+# Function to remove silence from audio
+def remove_silence(audio_data, sample_rate):
+    yt, _ = librosa.effects.trim(audio_data, top_db=50)
+    return yt
+
+# Function to preprocess audio before recognition
+def preprocess_audio(audio):
+    audio_data = np.frombuffer(audio.get_raw_data(), dtype=np.int16).astype(np.float32)
+
+    # Apply preprocessing steps
+    audio_data = reduce_noise(audio_data, audio.sample_rate)
+    audio_data = normalize_audio(audio_data)
+    audio_data = apply_highpass(audio_data, audio.sample_rate)
+    audio_data = remove_silence(audio_data, audio.sample_rate)
+
+    return audio_data, audio.sample_rate
+
+# Function to save the preprocessed audio
+def save_audio_file(audio_data, sample_rate, filename):
+    sf.write(filename, audio_data, sample_rate)
+    print(f"Audio saved as {filename}")
+
+# Function to recognize speech from preprocessed audio
+def recognize_audio(file_path):
+    recognizer = sr.Recognizer()
+    
+    with sr.AudioFile(file_path) as source:
+        audio = recognizer.record(source)  # Load preprocessed audio
+        try:
+            return recognizer.recognize_google(audio)
+        except sr.UnknownValueError:
+            return None
+        except sr.RequestError:
+            print("Speech recognition service unavailable.")
+            return None
+
+# Function to record, preprocess, and recognize voice
+def record_and_recognize(predefined_phrase):
+    recognizer = sr.Recognizer()
+    microphone = sr.Microphone()
+
+    # Force longer listening time
+    recognizer.energy_threshold = 300
+    recognizer.pause_threshold = 2.0
+    recognizer.dynamic_energy_threshold = False
+
+    recognized_phrases = []
+    attempt_count = 1
+
+    while len(recognized_phrases) < 3:
+        print(f"\nPlease say the phrase: '{predefined_phrase}' (Attempt {len(recognized_phrases) + 1}/3)")
+
+        with microphone as source:
+            recognizer.adjust_for_ambient_noise(source)  
+            print("Listening...")
+            audio = recognizer.listen(source, timeout=5, phrase_time_limit=5)  # 5 seconds max
+
+
+        # Preprocess audio
+        processed_audio, sample_rate = preprocess_audio(audio)
+
+        # Save processed audio
+        audio_filename = f"uservoice{attempt_count}.wav"
+        save_audio_file(processed_audio, sample_rate, audio_filename)
+
+        # Recognize speech from processed audio
+        recognized_text = recognize_audio(audio_filename)
+
+        if recognized_text:
+            print(f"Recognized: '{recognized_text}'")
+            score = fuzz.ratio(predefined_phrase.lower(), recognized_text.lower())
+
+            if score >= 70:
+                print(f"Success! The spoken text matches the predefined phrase with a score of {score}.")
+                recognized_phrases.append(recognized_text)
+                attempt_count += 1
+            else:
+                print(f"Text mismatch. Score: {score}. Please try again.")
+                time.sleep(1)
+        else:
+            print("Sorry, could not recognize speech. Please try again.")
+            time.sleep(1)
+
+    return recognized_phrases
+
+# Main function for enrollment
+def main():
+    while True:
+        predefined_phrase = input("Enter a phrase with at least 3 words for voice enrollment: ")
+        if len(predefined_phrase.split()) >= 3:
+            break
+        print("The phrase must contain at least 3 words. Please try again.")
+
+    recognized_phrases = record_and_recognize(predefined_phrase)
+
+    if recognized_phrases:
+        print("\nVoice enrollment successful!")
+        for i, phrase in enumerate(recognized_phrases, 1):
+            print(f"Sample {i}: {phrase}")
+    else:
+        print("\nEnrollment failed. Please try again.")
+
+if __name__ == "__main__":
+    main()
